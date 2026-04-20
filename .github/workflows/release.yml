@@ -1,0 +1,47 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          
+      - name: Install dependencies
+        run: npm install
+        
+      - name: Build project
+        run: npm run build
+        
+      - name: Prepare Release Artifacts
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          DIST_NAME="blue-lake-v${VERSION}"
+          mkdir -p ${DIST_NAME}
+          cp -r dist ${DIST_NAME}/
+          cp server.ts ${DIST_NAME}/
+          cp package.json ${DIST_NAME}/
+          cp README.md ${DIST_NAME}/
+          cp LICENSE ${DIST_NAME}/
+          cp -r public ${DIST_NAME}/
+          zip -r ${DIST_NAME}.zip ${DIST_NAME}
+          echo "ASSET_PATH=${DIST_NAME}.zip" >> $GITHUB_ENV
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ env.ASSET_PATH }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

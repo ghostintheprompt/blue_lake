@@ -1,5 +1,5 @@
 <div align="center">
-<img src="public/icon.png" width="200" height="200" alt="Blue Lake Icon" />
+<img src="public/icon.png" width="500" height="500" alt="Blue Lake Icon" />
 
 # Blue Lake
 

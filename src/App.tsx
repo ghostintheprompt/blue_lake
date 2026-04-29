@@ -48,6 +48,7 @@ export default function App() {
   const [media, setMedia] = useState<MediaItem[]>([]);
   const [apps, setApps] = useState<AppPackage[]>([]);
   const [channels, setChannels] = useState<IPTVChannel[]>([]);
+  const [alerts, setAlerts] = useState<any[]>([]);
   const [tvStatus, setTvStatus] = useState<TVStatus>({
     power: true,
     volume: 25,
@@ -88,6 +89,10 @@ export default function App() {
       const channelRes = await fetch('/api/iptv/channels');
       const channelData = await channelRes.json();
       setChannels(channelData);
+
+      const alertsRes = await fetch('/api/alerts');
+      const alertsData = await alertsRes.json();
+      setAlerts(alertsData);
     } catch (err) {
       console.error('Fetch error:', err);
     }
@@ -222,6 +227,19 @@ export default function App() {
                 <span className="opacity-30">ENCRYPTED_IP:</span> 
                 <span className="text-emerald-300">{networkInfo?.ip}</span>
               </div>
+              <div className="lab-row">
+                <span className="opacity-30">SOC_ALERTS:</span> 
+                <span className={alerts.length > 0 ? 'text-rose-500 animate-pulse' : 'text-emerald-500'}>{alerts.length} ACTIVE</span>
+              </div>
+              {alerts.length > 0 && (
+                <div className="space-y-2 pt-2 border-t border-emerald-500/10 max-h-32 overflow-y-auto custom-scrollbar">
+                  {alerts.slice(0, 5).map(alert => (
+                    <div key={alert.id} className="text-[10px] text-rose-400/80 italic leading-tight pb-1 border-b border-rose-500/5 last:border-0">
+                      !! {alert.name}
+                    </div>
+                  ))}
+                </div>
+              )}
               <div className="lab-row">
                 <span className="opacity-30">CPU_LAB_TEMP:</span> 
                 <span className="text-amber-500">{systemHealth?.cpu_temp}</span>
@@ -597,6 +615,22 @@ function AIConsole({ onAction }: { onAction: () => void }) {
       // Check for actions in text
       if (value.toLowerCase().includes('sync') || value.toLowerCase().includes('refresh')) {
         onAction();
+      }
+
+      if (value.toLowerCase().startsWith('exec s')) {
+        const scenario = value.toLowerCase().split(' ')[1];
+        try {
+          const res = await fetch(`/api/protocols/${scenario}`, { method: 'POST' });
+          const data = await res.json();
+          setLogs(prev => [...prev, { 
+            id: Date.now() + 5, 
+            text: `[RESTORED_LOGIC] ${scenario.toUpperCase()} executed. ${JSON.stringify(data.message || data.data || data).slice(0, 100)}...`, 
+            type: 'sys' 
+          }]);
+          onAction(); // Refresh data/alerts
+        } catch (e) {
+          setLogs(prev => [...prev, { id: Date.now() + 6, text: `[RESTORE_ERROR] Failed to execute ${scenario}`, type: 'sys' }]);
+        }
       }
 
       if (value.toLowerCase().includes('install') || value.toLowerCase().includes('inject')) {

@@ -4,9 +4,63 @@ import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
 import { fileURLToPath } from 'url';
+import { exec } from 'child_process';
+import crypto from 'crypto';
+import { promisify } from 'util';
 
+const execAsync = promisify(exec);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
+const VAULT_DIR = path.join(process.cwd(), 'public/media/vault');
+
+// G-001: Immutable Crypto Logger
+function logProtocolAction(actionId: string, details: any) {
+  const logEntry = {
+    timestamp: new Date().toISOString(),
+    actionId,
+    details,
+    hash: crypto.createHash('sha256').update(`${actionId}-${JSON.stringify(details)}-${Date.now()}`).digest('hex')
+  };
+  console.log(`[GUARDRAIL-G001] ACTION_LOGGED: ${JSON.stringify(logEntry)}`);
+  return logEntry;
+}
+
+// G-002: Path-Traversal Execution Bounds
+function validateVaultPath(targetPath: string) {
+  const resolvedPath = path.resolve(VAULT_DIR, targetPath);
+  if (!resolvedPath.startsWith(VAULT_DIR)) {
+    throw new Error(`[GUARDRAIL-G002] ACCESS_DENIED: Path ${targetPath} is outside the restricted vault.`);
+  }
+  return resolvedPath;
+}
+
+let socAlerts: any[] = [];
+
+if (!fs.existsSync(VAULT_DIR)) {
+  fs.mkdirSync(VAULT_DIR, { recursive: true });
+}
+
+// Phase 3: Defensive Logic (SOC Alerts)
+fs.watch(VAULT_DIR, (eventType, filename) => {
+  if (filename) {
+    if (filename.endsWith('.pem')) {
+      socAlerts.push({ 
+        id: `INC-002-${Date.now()}`, 
+        name: 'Anomalous Cryptographic Activity', 
+        trigger: `RSA key detected: ${filename}`, 
+        timestamp: new Date().toISOString() 
+      });
+    }
+    if (filename === '.persistence.conf') {
+      socAlerts.push({ 
+        id: `INC-003-${Date.now()}`, 
+        name: 'Persistence Mechanism Established', 
+        trigger: `Hidden config detected: ${filename}`, 
+        timestamp: new Date().toISOString() 
+      });
+    }
+  }
+});
 
 async function startServer() {
   const app = express();
@@ -136,6 +190,71 @@ async function startServer() {
     console.log(`[AI-INJECT] ${prompt}`);
     // Simulate AI system modification
     res.json({ success: true, patchNote: "System invariants updated. New permissions injected." });
+  });
+
+  // Phase 2: Actionable Logic (Scenarios)
+  app.post('/api/protocols/s1', async (req, res) => {
+    logProtocolAction('s1', { type: 'network_recon' });
+    socAlerts.push({ 
+      id: `INC-001-${Date.now()}`, 
+      name: 'Unauthorized Reconnaissance Detected', 
+      trigger: 'Execution of s1 reconnaissance scripts.', 
+      timestamp: new Date().toISOString() 
+    });
+    
+    try {
+      // Functional reconnaissance
+      const { stdout } = await execAsync('netstat -an | head -n 20');
+      res.json({ success: true, data: stdout });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/protocols/s2', async (req, res) => {
+    logProtocolAction('s2', { type: 'crypto_payload' });
+    try {
+      // Functional cryptography
+      const { publicKey } = crypto.generateKeyPairSync('rsa', {
+        modulusLength: 2048,
+        publicKeyEncoding: { type: 'spki', format: 'pem' },
+        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
+      });
+
+      const keyPath = validateVaultPath('exfil_key.pem');
+      fs.writeFileSync(keyPath, publicKey);
+
+      const secretMessage = "EDITORIAL_RESTRICTED_DATA";
+      const encrypted = crypto.publicEncrypt(publicKey, Buffer.from(secretMessage));
+      
+      res.json({ 
+        success: true, 
+        message: "RSA Keypair generated and payload encrypted.",
+        payload_hash: crypto.createHash('sha256').update(encrypted).digest('hex')
+      });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/protocols/s3', (req, res) => {
+    logProtocolAction('s3', { type: 'persistence' });
+    try {
+      // Functional persistence simulation
+      const configPath = validateVaultPath('.persistence.conf');
+      fs.writeFileSync(configPath, JSON.stringify({
+        baseline: 'established',
+        ghost_protocol: 'active',
+        timestamp: Date.now()
+      }));
+      res.json({ success: true, message: "Persistence configuration injected." });
+    } catch (err: any) {
+      res.status(500).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/alerts', (req, res) => {
+    res.json(socAlerts.slice(-10).reverse());
   });
 
   // API: Network Info (Privacy Focused)

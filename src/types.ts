@@ -25,12 +25,13 @@ export type TVStatus = {
   volume: number;
   input: string;
   currentApp: string;
+  health: DisplayHealth;
   lastCommand?: string;
 };
 
 export type StudioMode = 'capture-one' | 'davinci' | 'client-review' | 'mirror-check';
 
-export type AppWindow = 'none' | 'media' | 'displays' | 'settings' | 'apps' | 'guide';
+export type AppWindow = 'none' | 'media' | 'displays' | 'settings' | 'apps' | 'guide' | 'discovery' | 'presets';
 
 export type AppPackage = {
   id: string;
@@ -65,10 +66,44 @@ export type StudioActionLog = {
   timestamp: string;
 };
 
+export type DisplayHealth = {
+  reachable: 'unknown' | 'checking' | 'reachable' | 'unreachable';
+  adbState: 'unknown' | 'dry-run' | 'connected' | 'offline' | 'unauthorized' | 'missing-adb' | 'error';
+  model?: string;
+  product?: string;
+  lastChecked?: string;
+  message?: string;
+};
+
+export type DiscoveryCandidate = {
+  id: string;
+  ip: string;
+  adbPort: number;
+  reachable: boolean;
+  configuredDisplayId?: string;
+  label: string;
+  source: 'configured' | 'lan-scan' | 'dry-run-plan';
+  detail: string;
+};
+
+export type StudioPreset = {
+  id: string;
+  name: string;
+  shortcut: string;
+  description: string;
+  actions: Array<{
+    displayId: string;
+    action: string;
+    value?: string | number;
+  }>;
+};
+
 export type StudioStatus = {
   adbEnabled: boolean;
   activeMode: StudioMode;
   displays: TVStatus[];
   actions: StudioActionLog[];
   warnings: string[];
+  presets: StudioPreset[];
+  shortcuts: Array<{ key: string; label: string; action: string }>;
 };

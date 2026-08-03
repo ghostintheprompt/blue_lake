@@ -13,17 +13,23 @@ import {
   CheckCircle2,
   ChevronRight,
   Clapperboard,
+  Command,
   Eye,
   ExternalLink,
+  HeartPulse,
   Home,
   Info,
+  Keyboard,
   Layers,
   LayoutGrid,
   Monitor,
+  MonitorCheck,
   Package,
   Play,
   Power,
+  Radar,
   RefreshCw,
+  Search,
   Settings,
   Shield,
   ShieldAlert,
@@ -39,9 +45,11 @@ import {
 import {
   AppPackage,
   AppWindow,
+  DiscoveryCandidate,
   MediaItem,
   NetworkInfo,
   PerformanceMark,
+  StudioPreset,
   StudioActionLog,
   StudioMode,
   StudioStatus,
@@ -87,9 +95,14 @@ export default function App() {
   const [displays, setDisplays] = useState<TVStatus[]>([]);
   const [actions, setActions] = useState<StudioActionLog[]>([]);
   const [warnings, setWarnings] = useState<string[]>([]);
+  const [presets, setPresets] = useState<StudioPreset[]>([]);
+  const [shortcuts, setShortcuts] = useState<Array<{ key: string; label: string; action: string }>>([]);
+  const [discoveryCandidates, setDiscoveryCandidates] = useState<DiscoveryCandidate[]>([]);
   const [adbEnabled, setAdbEnabled] = useState(false);
   const [activeMode, setActiveMode] = useState<StudioMode>('capture-one');
   const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [discovering, setDiscovering] = useState(false);
+  const [diagnosing, setDiagnosing] = useState(false);
   const [time, setTime] = useState(new Date());
 
   useEffect(() => {
@@ -103,6 +116,8 @@ export default function App() {
     if (status.displays) setDisplays(status.displays);
     if (status.actions) setActions(status.actions);
     if (status.warnings) setWarnings(status.warnings);
+    if (status.presets) setPresets(status.presets);
+    if (status.shortcuts) setShortcuts(status.shortcuts);
   }, []);
 
   const fetchData = useCallback(async () => {
@@ -170,6 +185,54 @@ export default function App() {
     }
   };
 
+  const runPreset = async (presetId: string) => {
+    setBusyAction(`preset:${presetId}`);
+    try {
+      const response = await fetch(`/api/studio/preset/${presetId}/run`, { method: 'POST' });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Preset failed.');
+      absorbStudioStatus(data);
+    } catch (err) {
+      console.error('Preset error:', err);
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  const runHealthCheck = async (displayId?: string) => {
+    setDiagnosing(true);
+    try {
+      const response = await fetch('/api/studio/health-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(displayId ? { displayId } : {}),
+      });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Health check failed.');
+      absorbStudioStatus(data);
+    } catch (err) {
+      console.error('Health check error:', err);
+    } finally {
+      setDiagnosing(false);
+    }
+  };
+
+  const discoverFireTvs = async () => {
+    setDiscovering(true);
+    try {
+      const response = await fetch('/api/studio/discover');
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || 'Discovery failed.');
+      setDiscoveryCandidates(data.candidates || []);
+      absorbStudioStatus(data);
+      setActiveWindow('discovery');
+    } catch (err) {
+      console.error('Discovery error:', err);
+    } finally {
+      setDiscovering(false);
+    }
+  };
+
   const launchApp = async (displayId: string, app: AppPackage) => {
     if (!app.packageName) return;
     setBusyAction(`${displayId}:${app.id}`);
@@ -192,6 +255,43 @@ export default function App() {
       setBusyAction(null);
     }
   };
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (target?.closest('input, textarea, select, [contenteditable="true"]')) return;
+      if (event.metaKey || event.ctrlKey || event.altKey) return;
+
+      const key = event.key.toLowerCase();
+      const modeByKey: Partial<Record<string, StudioMode>> = {
+        '1': 'capture-one',
+        '2': 'davinci',
+        '3': 'client-review',
+        '4': 'mirror-check',
+      };
+      const presetByKey: Record<string, string> = {
+        r: 'room-ready',
+        c: 'capture-proof',
+        d: 'davinci-review',
+        v: 'client-review',
+        s: 'sleep-room',
+      };
+
+      if (modeByKey[key]) {
+        event.preventDefault();
+        applyMode(modeByKey[key]);
+      } else if (presetByKey[key]) {
+        event.preventDefault();
+        runPreset(presetByKey[key]);
+      } else if (key === '/') {
+        event.preventDefault();
+        setActiveWindow('discovery');
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [applyMode, runPreset]);
 
   return (
     <div className="relative min-h-screen overflow-hidden bg-[#050706] font-sans text-slate-100 selection:bg-emerald-400 selection:text-black">
@@ -218,6 +318,24 @@ export default function App() {
               label={adbEnabled ? 'ADB armed local' : 'ADB dry run'}
               tone={adbEnabled ? 'warn' : 'safe'}
             />
+            <button
+              onClick={discoverFireTvs}
+              className="studio-button h-9"
+              title="Discover Fire TV ADB candidates on the local studio network"
+              disabled={discovering}
+            >
+              {discovering ? <RefreshCw size={16} className="animate-spin" /> : <Search size={16} />}
+              Discover
+            </button>
+            <button
+              onClick={() => runHealthCheck()}
+              className="studio-button h-9"
+              title="Run reachability and ADB diagnostics"
+              disabled={diagnosing}
+            >
+              {diagnosing ? <RefreshCw size={16} className="animate-spin" /> : <HeartPulse size={16} />}
+              Check
+            </button>
             <button
               onClick={() => setIsPrivacyActive((value) => !value)}
               className={`studio-button h-9 ${isPrivacyActive ? 'text-emerald-300' : 'text-amber-300'}`}
@@ -248,7 +366,9 @@ export default function App() {
                   <DisplayCard
                     display={display}
                     busyAction={busyAction}
+                    diagnosing={diagnosing}
                     onControl={controlDisplay}
+                    onHealthCheck={runHealthCheck}
                   />
                 </div>
               ))}
@@ -285,6 +405,14 @@ export default function App() {
                   <Package size={16} />
                   Apps
                 </button>
+                <button onClick={() => setActiveWindow('presets')} className="studio-button h-10" title="Open quick preset deck">
+                  <Command size={16} />
+                  Presets
+                </button>
+                <button onClick={discoverFireTvs} className="studio-button h-10" title="Discover Fire TVs" disabled={discovering}>
+                  {discovering ? <RefreshCw size={16} className="animate-spin" /> : <Radar size={16} />}
+                  Discovery
+                </button>
               </div>
             </div>
 
@@ -318,6 +446,16 @@ export default function App() {
                 onClick={applyMode}
               />
             </div>
+            <QuickCommandDeck
+              presets={presets}
+              shortcuts={shortcuts}
+              busyAction={busyAction}
+              onPreset={runPreset}
+              onHealthCheck={() => runHealthCheck()}
+              onDiscover={discoverFireTvs}
+              discovering={discovering}
+              diagnosing={diagnosing}
+            />
           </section>
 
           <div className="grid grid-cols-1 gap-5 2xl:grid-cols-2">
@@ -378,6 +516,8 @@ export default function App() {
           <DockIcon icon={<LayoutGrid size={18} />} active={activeWindow === 'none'} onClick={() => setActiveWindow('none')} label="Home" />
           <DockIcon icon={<Tv size={18} />} active={activeWindow === 'displays'} onClick={() => setActiveWindow('displays')} label="Displays" />
           <DockIcon icon={<Package size={18} />} active={activeWindow === 'apps'} onClick={() => setActiveWindow('apps')} label="Apps" />
+          <DockIcon icon={<Command size={18} />} active={activeWindow === 'presets'} onClick={() => setActiveWindow('presets')} label="Presets" />
+          <DockIcon icon={<Radar size={18} />} active={activeWindow === 'discovery'} onClick={() => setActiveWindow('discovery')} label="Discovery" />
           <DockIcon icon={<Layers size={18} />} active={activeWindow === 'media'} onClick={() => setActiveWindow('media')} label="Media" />
           <DockIcon icon={<Info size={18} />} active={activeWindow === 'guide'} onClick={() => setActiveWindow('guide')} label="Guide" />
           <DockIcon icon={<Settings size={18} />} active={activeWindow === 'settings'} onClick={() => setActiveWindow('settings')} label="Settings" />
@@ -392,7 +532,38 @@ export default function App() {
         )}
         {activeWindow === 'displays' && (
           <StudioOverlay title="Display Control" onClose={() => setActiveWindow('none')}>
-            <DisplayConsole displays={displays} busyAction={busyAction} onControl={controlDisplay} />
+            <DisplayConsole
+              displays={displays}
+              busyAction={busyAction}
+              diagnosing={diagnosing}
+              onControl={controlDisplay}
+              onHealthCheck={runHealthCheck}
+            />
+          </StudioOverlay>
+        )}
+        {activeWindow === 'presets' && (
+          <StudioOverlay title="Quick Presets" onClose={() => setActiveWindow('none')}>
+            <PresetConsole
+              presets={presets}
+              shortcuts={shortcuts}
+              busyAction={busyAction}
+              diagnosing={diagnosing}
+              discovering={discovering}
+              onPreset={runPreset}
+              onHealthCheck={() => runHealthCheck()}
+              onDiscover={discoverFireTvs}
+            />
+          </StudioOverlay>
+        )}
+        {activeWindow === 'discovery' && (
+          <StudioOverlay title="Fire TV Discovery" onClose={() => setActiveWindow('none')}>
+            <DiscoveryConsole
+              candidates={discoveryCandidates}
+              displays={displays}
+              adbEnabled={adbEnabled}
+              discovering={discovering}
+              onDiscover={discoverFireTvs}
+            />
           </StudioOverlay>
         )}
         {activeWindow === 'apps' && (
@@ -465,12 +636,21 @@ function WarningStrip({ adbEnabled, warnings }: { adbEnabled: boolean; warnings:
   );
 }
 
-function DisplayCard({ display, busyAction, onControl }: {
+function DisplayCard({ display, busyAction, diagnosing, onControl, onHealthCheck }: {
   display: TVStatus;
   busyAction: string | null;
+  diagnosing: boolean;
   onControl: (displayId: string, action: string, value?: string | number) => void;
+  onHealthCheck: (displayId: string) => void;
 }) {
   const busy = (action: string) => busyAction === `${display.id}:${action}`;
+  const healthTone = display.health.adbState === 'connected'
+    ? 'border-emerald-300/30 bg-emerald-300/10 text-emerald-200'
+    : display.health.adbState === 'dry-run'
+      ? 'border-sky-300/25 bg-sky-300/10 text-sky-200'
+      : display.health.reachable === 'unreachable' || display.health.adbState === 'error'
+        ? 'border-rose-300/30 bg-rose-300/10 text-rose-200'
+        : 'border-amber-300/30 bg-amber-300/10 text-amber-200';
   return (
     <div className="border border-white/10 bg-white/[0.03] p-4">
       <div className="flex items-start justify-between gap-3">
@@ -482,8 +662,13 @@ function DisplayCard({ display, busyAction, onControl }: {
           <p className="mt-1 text-sm text-slate-400">{display.role}</p>
           <p className="mt-2 font-mono text-xs text-slate-500">{display.ip}:{display.adbPort} | {display.input}</p>
         </div>
-        <div className={`px-2 py-1 text-xs font-bold uppercase ${display.power ? 'bg-emerald-400/10 text-emerald-200' : 'bg-slate-500/10 text-slate-400'}`}>
-          {display.power ? 'awake' : 'sleep'}
+        <div className="flex flex-col items-end gap-2">
+          <div className={`px-2 py-1 text-xs font-bold uppercase ${display.power ? 'bg-emerald-400/10 text-emerald-200' : 'bg-slate-500/10 text-slate-400'}`}>
+            {display.power ? 'awake' : 'sleep'}
+          </div>
+          <div className={`px-2 py-1 text-xs font-bold uppercase ${healthTone}`}>
+            {display.health.adbState}
+          </div>
         </div>
       </div>
 
@@ -493,6 +678,16 @@ function DisplayCard({ display, busyAction, onControl }: {
         <MiniControl icon={<Home size={15} />} label="Home" busy={busy('home')} onClick={() => onControl(display.id, 'home')} />
         <MiniControl icon={<VolumeX size={15} />} label="Mute" busy={busy('mute')} onClick={() => onControl(display.id, 'mute')} />
       </div>
+
+      <button
+        className="studio-button mt-3 h-10 w-full justify-center"
+        title={`Check ${display.name}`}
+        onClick={() => onHealthCheck(display.id)}
+        disabled={diagnosing}
+      >
+        {diagnosing ? <RefreshCw size={15} className="animate-spin" /> : <HeartPulse size={15} />}
+        Check TV
+      </button>
 
       <div className="mt-3 flex items-center justify-between gap-2 border-t border-white/10 pt-3">
         <button className="icon-button" title="Volume down" onClick={() => onControl(display.id, 'volume_down')} disabled={busy('volume_down')}>
@@ -509,6 +704,12 @@ function DisplayCard({ display, busyAction, onControl }: {
 
       {display.lastCommand && (
         <p className="mt-3 break-all font-mono text-xs text-slate-600">{display.lastCommand}</p>
+      )}
+      {display.health.message && (
+        <p className="mt-3 text-xs leading-5 text-slate-500">{display.health.message}</p>
+      )}
+      {display.health.model && (
+        <p className="mt-2 font-mono text-xs text-emerald-300/70">{display.health.model} {display.health.product || ''}</p>
       )}
     </div>
   );
@@ -546,6 +747,178 @@ function ModeButton({ mode, activeMode, busy, icon, onClick }: {
       <p className="mt-1 text-xs uppercase text-emerald-300/60">{details.label}</p>
       <p className="mt-3 text-sm leading-6 text-slate-400">{details.move}</p>
     </button>
+  );
+}
+
+function QuickCommandDeck({ presets, shortcuts, busyAction, onPreset, onHealthCheck, onDiscover, discovering, diagnosing }: {
+  presets: StudioPreset[];
+  shortcuts: Array<{ key: string; label: string; action: string }>;
+  busyAction: string | null;
+  onPreset: (presetId: string) => void;
+  onHealthCheck: () => void;
+  onDiscover: () => void;
+  discovering: boolean;
+  diagnosing: boolean;
+}) {
+  return (
+    <div className="mt-6 border-t border-white/10 pt-5">
+      <div className="mb-4 flex flex-col gap-3 lg:flex-row lg:items-center lg:justify-between">
+        <SectionTitle icon={<Command size={18} />} label="Control" title="Quick Deck" />
+        <div className="flex flex-wrap gap-2">
+          {shortcuts.slice(0, 4).map((shortcut) => (
+            <span key={shortcut.action} className="inline-flex h-8 items-center gap-2 border border-white/10 bg-white/[0.03] px-2 text-xs uppercase text-slate-400">
+              <kbd className="font-mono text-emerald-200">{shortcut.key}</kbd>
+              {shortcut.label}
+            </span>
+          ))}
+        </div>
+      </div>
+      <div className="grid grid-cols-2 gap-3 lg:grid-cols-7">
+        {presets.map((preset) => (
+          <button
+            key={preset.id}
+            className="studio-button min-h-16 flex-col items-start justify-center"
+            title={preset.description}
+            onClick={() => onPreset(preset.id)}
+            disabled={busyAction === `preset:${preset.id}`}
+          >
+            <span className="flex w-full items-center justify-between gap-2">
+              <span>{preset.name}</span>
+              <kbd className="font-mono text-xs text-emerald-100/70">{preset.shortcut}</kbd>
+            </span>
+            {busyAction === `preset:${preset.id}` && <RefreshCw size={14} className="animate-spin" />}
+          </button>
+        ))}
+        <button className="studio-button min-h-16 flex-col items-start justify-center" onClick={onHealthCheck} disabled={diagnosing} title="Run studio diagnostics">
+          <span className="flex w-full items-center justify-between gap-2">
+            <span>Health Check</span>
+            {diagnosing ? <RefreshCw size={14} className="animate-spin" /> : <HeartPulse size={14} />}
+          </span>
+        </button>
+        <button className="studio-button min-h-16 flex-col items-start justify-center" onClick={onDiscover} disabled={discovering} title="Discover local Fire TV ADB candidates">
+          <span className="flex w-full items-center justify-between gap-2">
+            <span>Discover</span>
+            {discovering ? <RefreshCw size={14} className="animate-spin" /> : <Radar size={14} />}
+          </span>
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PresetConsole({ presets, shortcuts, busyAction, diagnosing, discovering, onPreset, onHealthCheck, onDiscover }: {
+  presets: StudioPreset[];
+  shortcuts: Array<{ key: string; label: string; action: string }>;
+  busyAction: string | null;
+  diagnosing: boolean;
+  discovering: boolean;
+  onPreset: (presetId: string) => void;
+  onHealthCheck: () => void;
+  onDiscover: () => void;
+}) {
+  return (
+    <div className="grid gap-5 p-5 xl:grid-cols-[1.4fr_0.9fr]">
+      <section className="studio-card p-5">
+        <SectionTitle icon={<Command size={18} />} label="Presets" title="Studio Quick Deck" />
+        <div className="mt-5 grid gap-3 md:grid-cols-2 xl:grid-cols-3">
+          {presets.map((preset) => (
+            <button
+              key={preset.id}
+              className="border border-white/10 bg-white/[0.03] p-4 text-left transition-colors hover:border-emerald-300/40 hover:bg-emerald-300/[0.06]"
+              title={preset.description}
+              disabled={busyAction === `preset:${preset.id}`}
+              onClick={() => onPreset(preset.id)}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <MonitorCheck size={20} className="text-emerald-300" />
+                <kbd className="border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 font-mono text-xs text-emerald-100">{preset.shortcut}</kbd>
+              </div>
+              <p className="mt-4 font-black uppercase text-white">{preset.name}</p>
+              <p className="mt-2 text-sm leading-6 text-slate-400">{preset.description}</p>
+              <p className="mt-3 font-mono text-xs text-slate-600">{preset.actions.length} actions</p>
+            </button>
+          ))}
+          <button className="studio-button min-h-28 flex-col items-start justify-center" onClick={onHealthCheck} disabled={diagnosing} title="Run health check">
+            {diagnosing ? <RefreshCw size={18} className="animate-spin" /> : <HeartPulse size={18} />}
+            Health Check
+          </button>
+          <button className="studio-button min-h-28 flex-col items-start justify-center" onClick={onDiscover} disabled={discovering} title="Discover Fire TVs">
+            {discovering ? <RefreshCw size={18} className="animate-spin" /> : <Radar size={18} />}
+            Discover
+          </button>
+        </div>
+      </section>
+      <section className="studio-card p-5">
+        <SectionTitle icon={<Keyboard size={18} />} label="Keys" title="Shortcuts" />
+        <div className="mt-5 space-y-2">
+          {shortcuts.map((shortcut) => (
+            <div key={shortcut.action} className="flex items-center justify-between gap-3 border border-white/10 bg-white/[0.03] p-3">
+              <span className="text-sm text-slate-300">{shortcut.label}</span>
+              <kbd className="border border-emerald-300/20 bg-emerald-300/10 px-2 py-1 font-mono text-xs text-emerald-100">{shortcut.key}</kbd>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+}
+
+function DiscoveryConsole({ candidates, displays, adbEnabled, discovering, onDiscover }: {
+  candidates: DiscoveryCandidate[];
+  displays: TVStatus[];
+  adbEnabled: boolean;
+  discovering: boolean;
+  onDiscover: () => void;
+}) {
+  const configuredIds = new Set(displays.map((display) => display.id));
+  return (
+    <div className="space-y-5 p-5">
+      <div className="flex flex-col gap-4 lg:flex-row lg:items-center lg:justify-between">
+        <SectionTitle icon={<Radar size={18} />} label="LAN" title="Fire TV Discovery" />
+        <button className="studio-button h-10" onClick={onDiscover} disabled={discovering} title="Run discovery again">
+          {discovering ? <RefreshCw size={16} className="animate-spin" /> : <Search size={16} />}
+          Scan
+        </button>
+      </div>
+      <div className={`border p-4 ${adbEnabled ? 'border-amber-300/30 bg-amber-300/10' : 'border-sky-300/20 bg-sky-300/10'}`}>
+        <div className="flex items-start gap-3">
+          {adbEnabled ? <AlertTriangle size={18} className="mt-0.5 text-amber-200" /> : <Shield size={18} className="mt-0.5 text-sky-200" />}
+          <p className="text-sm leading-6 text-slate-300">
+            {adbEnabled
+              ? 'Armed discovery probes the local subnet for open ADB ports. Confirm the Fire TV pairing prompt before trusting a candidate.'
+              : 'Dry-run discovery checks configured TVs and shows the LAN addresses it would scan when armed.'}
+          </p>
+        </div>
+      </div>
+      <div className="grid gap-4 lg:grid-cols-2 xl:grid-cols-3">
+        {candidates.length === 0 && (
+          <section className="studio-card p-8 lg:col-span-2">
+            <Radar size={34} className="text-emerald-300/50" />
+            <h2 className="mt-5 text-xl font-black uppercase text-white">No scan run yet</h2>
+            <p className="mt-3 text-sm leading-6 text-slate-400">Run Scan after the Fire TVs are awake and ADB debugging is enabled.</p>
+          </section>
+        )}
+        {candidates.map((candidate) => (
+          <section key={candidate.id} className="studio-card p-5">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <p className="font-black uppercase text-white">{candidate.label}</p>
+                <p className="mt-2 font-mono text-xs text-slate-500">{candidate.ip}:{candidate.adbPort}</p>
+              </div>
+              <span className={`px-2 py-1 text-xs font-bold uppercase ${candidate.reachable ? 'bg-emerald-300/10 text-emerald-200' : 'bg-slate-500/10 text-slate-400'}`}>
+                {candidate.reachable ? 'open' : candidate.source}
+              </span>
+            </div>
+            <p className="mt-4 text-sm leading-6 text-slate-400">{candidate.detail}</p>
+            <pre className="mt-4 overflow-auto border border-white/10 bg-black p-3 font-mono text-xs text-slate-400">{`FIRE_TV_${(candidate.configuredDisplayId || 'X').toUpperCase()}_IP=${candidate.ip}
+FIRE_TV_${(candidate.configuredDisplayId || 'X').toUpperCase()}_ADB_PORT=${candidate.adbPort}`}</pre>
+            {candidate.configuredDisplayId && configuredIds.has(candidate.configuredDisplayId) && (
+              <p className="mt-3 text-xs uppercase text-emerald-300/60">Configured display {candidate.configuredDisplayId}</p>
+            )}
+          </section>
+        ))}
+      </div>
+    </div>
   );
 }
 
@@ -648,10 +1021,12 @@ function StudioOverlay({ title, children, onClose }: { title: string; children: 
   );
 }
 
-function DisplayConsole({ displays, busyAction, onControl }: {
+function DisplayConsole({ displays, busyAction, diagnosing, onControl, onHealthCheck }: {
   displays: TVStatus[];
   busyAction: string | null;
+  diagnosing: boolean;
   onControl: (displayId: string, action: string, value?: string | number) => void;
+  onHealthCheck: (displayId: string) => void;
 }) {
   const navActions = [
     ['up', 'Up'],
@@ -666,7 +1041,13 @@ function DisplayConsole({ displays, busyAction, onControl }: {
     <div className="grid gap-5 p-5 lg:grid-cols-2">
       {displays.map((display) => (
         <section key={display.id} className="studio-card p-5">
-          <DisplayCard display={display} busyAction={busyAction} onControl={onControl} />
+          <DisplayCard
+            display={display}
+            busyAction={busyAction}
+            diagnosing={diagnosing}
+            onControl={onControl}
+            onHealthCheck={onHealthCheck}
+          />
           <div className="mt-5 grid grid-cols-3 gap-2">
             {navActions.map(([action, label]) => (
               <button key={action} className="studio-button h-11 justify-center" onClick={() => onControl(display.id, action)} title={label}>
@@ -814,11 +1195,11 @@ function SettingsPanel({ networkInfo, adbEnabled }: { networkInfo: NetworkInfo |
         <SectionTitle icon={<Settings size={18} />} label="Environment" title="Two-TV Config" />
         <pre className="mt-5 overflow-auto border border-white/10 bg-black p-4 font-mono text-xs leading-6 text-slate-300">{`BLUE_LAKE_ENABLE_ADB=${adbEnabled ? 'true' : 'false'}
 FIRE_TV_A_NAME=Client Proof TV
-FIRE_TV_A_IP=192.168.1.50
+FIRE_TV_A_IP=192.0.2.50
 FIRE_TV_A_ROLE=Capture One viewer
 
 FIRE_TV_B_NAME=Reference Playback TV
-FIRE_TV_B_IP=192.168.1.51
+FIRE_TV_B_IP=192.0.2.51
 FIRE_TV_B_ROLE=DaVinci review`}</pre>
       </section>
       <section className="studio-card p-6">

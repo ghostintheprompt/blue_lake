@@ -6,6 +6,7 @@ import fs from 'fs';
 import cors from 'cors';
 import os from 'os';
 import crypto from 'crypto';
+import net from 'net';
 import { fileURLToPath } from 'url';
 import { execFile } from 'child_process';
 import { promisify } from 'util';
@@ -18,8 +19,19 @@ const PORT = Number(process.env.PORT || 3000);
 const HOST = process.env.HOST || '127.0.0.1';
 const ADB_ENABLED = process.env.BLUE_LAKE_ENABLE_ADB === 'true';
 const DEFAULT_ADB_PORT = Number(process.env.BLUE_LAKE_ADB_PORT || 5555);
+const DISCOVERY_TIMEOUT_MS = Number(process.env.BLUE_LAKE_DISCOVERY_TIMEOUT_MS || 450);
+const DISCOVERY_LIMIT = Number(process.env.BLUE_LAKE_DISCOVERY_LIMIT || 254);
 
 type StudioMode = 'capture-one' | 'davinci' | 'client-review' | 'mirror-check';
+
+type DisplayHealth = {
+  reachable: 'unknown' | 'checking' | 'reachable' | 'unreachable';
+  adbState: 'unknown' | 'dry-run' | 'connected' | 'offline' | 'unauthorized' | 'missing-adb' | 'error';
+  model?: string;
+  product?: string;
+  lastChecked?: string;
+  message?: string;
+};
 
 type TVStatus = {
   id: string;
@@ -32,6 +44,7 @@ type TVStatus = {
   volume: number;
   input: string;
   currentApp: string;
+  health: DisplayHealth;
   lastCommand?: string;
 };
 
@@ -41,6 +54,29 @@ type StudioActionLog = {
   action: string;
   detail: string;
   timestamp: string;
+};
+
+type DiscoveryCandidate = {
+  id: string;
+  ip: string;
+  adbPort: number;
+  reachable: boolean;
+  configuredDisplayId?: string;
+  label: string;
+  source: 'configured' | 'lan-scan' | 'dry-run-plan';
+  detail: string;
+};
+
+type StudioPreset = {
+  id: string;
+  name: string;
+  shortcut: string;
+  description: string;
+  actions: Array<{
+    displayId: string;
+    action: string;
+    value?: string | number;
+  }>;
 };
 
 const keyEvents: Record<string, string> = {
@@ -61,6 +97,12 @@ const keyEvents: Record<string, string> = {
   mute: 'KEYCODE_VOLUME_MUTE',
 };
 
+const defaultHealth: DisplayHealth = {
+  reachable: 'unknown',
+  adbState: ADB_ENABLED ? 'unknown' : 'dry-run',
+  message: ADB_ENABLED ? 'Ready for local diagnostic check.' : 'Dry-run mode. Diagnostics will show command plans.',
+};
+
 let activeMode: StudioMode = 'capture-one';
 let actionLog: StudioActionLog[] = [];
 
@@ -69,25 +111,27 @@ let displays: TVStatus[] = [
     id: 'a',
     name: process.env.FIRE_TV_A_NAME || 'Client Proof TV',
     role: process.env.FIRE_TV_A_ROLE || 'Capture One viewer',
-    ip: process.env.FIRE_TV_A_IP || '192.168.1.50',
+    ip: process.env.FIRE_TV_A_IP || '192.0.2.50',
     adbPort: Number(process.env.FIRE_TV_A_ADB_PORT || DEFAULT_ADB_PORT),
     connected: false,
     power: true,
     volume: 12,
     input: process.env.FIRE_TV_A_INPUT || 'HDMI 1',
     currentApp: 'Fire TV Home',
+    health: { ...defaultHealth },
   },
   {
     id: 'b',
     name: process.env.FIRE_TV_B_NAME || 'Reference Playback TV',
     role: process.env.FIRE_TV_B_ROLE || 'DaVinci review',
-    ip: process.env.FIRE_TV_B_IP || '192.168.1.51',
+    ip: process.env.FIRE_TV_B_IP || '192.0.2.51',
     adbPort: Number(process.env.FIRE_TV_B_ADB_PORT || DEFAULT_ADB_PORT),
     connected: false,
     power: true,
     volume: 12,
     input: process.env.FIRE_TV_B_INPUT || 'HDMI 1',
     currentApp: 'Fire TV Home',
+    health: { ...defaultHealth },
   },
 ];
 
@@ -99,6 +143,105 @@ const studioWarnings = [
 
 function serialFor(display: TVStatus) {
   return `${display.ip}:${display.adbPort}`;
+}
+
+function studioPresets(): StudioPreset[] {
+  const captureLaunch = process.env.BLUE_LAKE_CAPTURE_URL
+    ? { displayId: process.env.BLUE_LAKE_CAPTURE_TARGET || 'a', action: 'open_url', value: process.env.BLUE_LAKE_CAPTURE_URL }
+    : process.env.BLUE_LAKE_CAPTURE_PACKAGE
+      ? { displayId: process.env.BLUE_LAKE_CAPTURE_TARGET || 'a', action: 'launch_app', value: process.env.BLUE_LAKE_CAPTURE_PACKAGE }
+      : undefined;
+
+  const davinciLaunch = process.env.BLUE_LAKE_DAVINCI_URL
+    ? { displayId: process.env.BLUE_LAKE_DAVINCI_TARGET || 'b', action: 'open_url', value: process.env.BLUE_LAKE_DAVINCI_URL }
+    : process.env.BLUE_LAKE_DAVINCI_PACKAGE
+      ? { displayId: process.env.BLUE_LAKE_DAVINCI_TARGET || 'b', action: 'launch_app', value: process.env.BLUE_LAKE_DAVINCI_PACKAGE }
+      : undefined;
+
+  const reviewLaunch = process.env.BLUE_LAKE_REVIEW_URL
+    ? { displayId: process.env.BLUE_LAKE_REVIEW_TARGET || 'a', action: 'open_url', value: process.env.BLUE_LAKE_REVIEW_URL }
+    : undefined;
+
+  const basePrep = displays.flatMap((display) => [
+    { displayId: display.id, action: 'connect' },
+    { displayId: display.id, action: 'wake' },
+    { displayId: display.id, action: 'home' },
+  ]);
+
+  return [
+    {
+      id: 'room-ready',
+      name: 'Room Ready',
+      shortcut: 'R',
+      description: 'Connect, wake, and return both displays to Home before a session starts.',
+      actions: basePrep,
+    },
+    {
+      id: 'capture-proof',
+      name: 'Capture Proof',
+      shortcut: 'C',
+      description: 'Prep the room for tethered stills and launch the configured Capture One receiver when available.',
+      actions: [
+        ...basePrep,
+        { displayId: 'a', action: 'mute' },
+        ...(captureLaunch ? [captureLaunch] : []),
+      ],
+    },
+    {
+      id: 'davinci-review',
+      name: 'DaVinci Review',
+      shortcut: 'D',
+      description: 'Prep the playback display and launch the configured review receiver when available.',
+      actions: [
+        ...basePrep,
+        { displayId: 'b', action: 'mute' },
+        ...(davinciLaunch ? [davinciLaunch] : []),
+      ],
+    },
+    {
+      id: 'client-review',
+      name: 'Client Review',
+      shortcut: 'V',
+      description: 'Open the configured review URL on the target display for selects, reels, or gallery review.',
+      actions: [
+        ...basePrep,
+        ...(reviewLaunch ? [reviewLaunch] : []),
+      ],
+    },
+    {
+      id: 'sleep-room',
+      name: 'Sleep Room',
+      shortcut: 'S',
+      description: 'Put both displays to sleep at the end of the day.',
+      actions: displays.map((display) => ({ displayId: display.id, action: 'sleep' })),
+    },
+  ];
+}
+
+function studioShortcuts() {
+  return [
+    { key: '1', label: 'Capture One mode', action: 'mode:capture-one' },
+    { key: '2', label: 'DaVinci mode', action: 'mode:davinci' },
+    { key: '3', label: 'Client Review mode', action: 'mode:client-review' },
+    { key: '4', label: 'Mirror Check mode', action: 'mode:mirror-check' },
+    { key: 'R', label: 'Room Ready preset', action: 'preset:room-ready' },
+    { key: 'C', label: 'Capture Proof preset', action: 'preset:capture-proof' },
+    { key: 'D', label: 'DaVinci Review preset', action: 'preset:davinci-review' },
+    { key: 'V', label: 'Client Review preset', action: 'preset:client-review' },
+    { key: 'S', label: 'Sleep Room preset', action: 'preset:sleep-room' },
+  ];
+}
+
+function studioStatus() {
+  return {
+    adbEnabled: ADB_ENABLED,
+    activeMode,
+    displays,
+    actions: actionLog,
+    warnings: studioWarnings,
+    presets: studioPresets(),
+    shortcuts: studioShortcuts(),
+  };
 }
 
 function logStudioAction(displayId: string, action: string, detail: string) {
@@ -152,6 +295,226 @@ async function runAdb(display: TVStatus, args: string[]) {
     maxBuffer: 1024 * 1024,
   });
   return { dryRun: false, command, stdout };
+}
+
+async function adbRaw(args: string[]) {
+  const command = `adb ${args.join(' ')}`;
+  if (!ADB_ENABLED) {
+    return { dryRun: true, command, stdout: '' };
+  }
+
+  const { stdout } = await execFileAsync('adb', args, {
+    timeout: 8000,
+    maxBuffer: 1024 * 1024,
+  });
+  return { dryRun: false, command, stdout };
+}
+
+function parseAdbState(stdout: string, serial: string) {
+  const line = stdout.split('\n').find((entry) => entry.startsWith(serial));
+  if (!line) return 'offline';
+  if (line.includes('unauthorized')) return 'unauthorized';
+  if (line.includes('offline')) return 'offline';
+  if (line.includes('\tdevice')) return 'connected';
+  return 'unknown';
+}
+
+async function probeTcp(host: string, port: number, timeoutMs = DISCOVERY_TIMEOUT_MS) {
+  return new Promise<boolean>((resolve) => {
+    const socket = net.createConnection({ host, port });
+    const done = (reachable: boolean) => {
+      socket.removeAllListeners();
+      socket.destroy();
+      resolve(reachable);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => done(true));
+    socket.once('timeout', () => done(false));
+    socket.once('error', () => done(false));
+  });
+}
+
+async function runWithConcurrency<T, R>(
+  items: T[],
+  limit: number,
+  worker: (item: T) => Promise<R>,
+) {
+  const results: R[] = [];
+  let cursor = 0;
+  const workers = Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (cursor < items.length) {
+      const index = cursor;
+      cursor += 1;
+      results[index] = await worker(items[index]);
+    }
+  });
+  await Promise.all(workers);
+  return results;
+}
+
+function subnetCandidates() {
+  const explicit = process.env.BLUE_LAKE_DISCOVERY_IPS
+    ?.split(',')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (explicit?.length) return explicit.slice(0, DISCOVERY_LIMIT);
+
+  const ip = localIp();
+  const parts = ip.split('.');
+  if (parts.length !== 4 || ip === '127.0.0.1') {
+    return displays.map((display) => display.ip);
+  }
+
+  const prefix = parts.slice(0, 3).join('.');
+  const ownHost = Number(parts[3]);
+  return Array.from({ length: 254 }, (_, index) => index + 1)
+    .filter((host) => host !== ownHost)
+    .slice(0, DISCOVERY_LIMIT)
+    .map((host) => `${prefix}.${host}`);
+}
+
+async function discoverDisplays() {
+  const configured = await Promise.all(displays.map(async (display) => {
+    const reachable = await probeTcp(display.ip, display.adbPort);
+    return {
+      id: `configured-${display.id}`,
+      ip: display.ip,
+      adbPort: display.adbPort,
+      reachable,
+      configuredDisplayId: display.id,
+      label: display.name,
+      source: 'configured' as const,
+      detail: reachable
+        ? 'Configured display has an open ADB port.'
+        : 'Configured display did not answer on the ADB port.',
+    };
+  }));
+
+  const configuredKeys = new Set(displays.map((display) => `${display.ip}:${display.adbPort}`));
+  const candidates = subnetCandidates().filter((ip) => !configuredKeys.has(`${ip}:${DEFAULT_ADB_PORT}`));
+
+  if (!ADB_ENABLED) {
+    const plans = candidates.slice(0, 24).map((ip) => ({
+      id: `dry-${ip}`,
+      ip,
+      adbPort: DEFAULT_ADB_PORT,
+      reachable: false,
+      label: `${ip}:${DEFAULT_ADB_PORT}`,
+      source: 'dry-run-plan' as const,
+      detail: 'Dry-run plan only. Arm local ADB to probe the LAN for open Fire TV ADB ports.',
+    }));
+    return [...configured, ...plans];
+  }
+
+  const scanResults = await runWithConcurrency(candidates, 32, async (ip) => ({
+    ip,
+    reachable: await probeTcp(ip, DEFAULT_ADB_PORT),
+  }));
+
+  const discovered: DiscoveryCandidate[] = scanResults
+    .filter((result) => result.reachable)
+    .map((result) => ({
+      id: `scan-${result.ip}`,
+      ip: result.ip,
+      adbPort: DEFAULT_ADB_PORT,
+      reachable: true,
+      label: `${result.ip}:${DEFAULT_ADB_PORT}`,
+      source: 'lan-scan',
+      detail: 'Open ADB-like port found. Confirm on the Fire TV before adding it to .env.',
+    }));
+
+  return [...configured, ...discovered];
+}
+
+async function checkDisplayHealth(display: TVStatus) {
+  const checkedAt = new Date().toISOString();
+  updateDisplay(display.id, {
+    health: {
+      ...display.health,
+      reachable: 'checking',
+      lastChecked: checkedAt,
+    },
+  });
+
+  const reachable = await probeTcp(display.ip, display.adbPort);
+
+  if (!ADB_ENABLED) {
+    const health: DisplayHealth = {
+      reachable: reachable ? 'reachable' : 'unreachable',
+      adbState: 'dry-run',
+      lastChecked: checkedAt,
+      message: reachable
+        ? 'ADB port answered. Dry-run mode did not connect.'
+        : 'ADB port did not answer. Confirm IP, wake state, and Fire TV ADB debugging.',
+    };
+    updateDisplay(display.id, { health });
+    logStudioAction(display.id, 'health_check', `DRY RUN: tcp ${display.ip}:${display.adbPort} ${health.reachable}`);
+    return health;
+  }
+
+  if (!reachable) {
+    const health: DisplayHealth = {
+      reachable: 'unreachable',
+      adbState: 'offline',
+      lastChecked: checkedAt,
+      message: 'No TCP response on the configured ADB port.',
+    };
+    updateDisplay(display.id, { connected: false, health });
+    logStudioAction(display.id, 'health_check', `UNREACHABLE: ${display.ip}:${display.adbPort}`);
+    return health;
+  }
+
+  try {
+    await adbRaw(['connect', serialFor(display)]);
+    const devices = await adbRaw(['devices']);
+    const adbState = parseAdbState(devices.stdout, serialFor(display));
+    const model = adbState === 'connected'
+      ? (await adbRaw(['-s', serialFor(display), 'shell', 'getprop', 'ro.product.model'])).stdout.trim()
+      : undefined;
+    const product = adbState === 'connected'
+      ? (await adbRaw(['-s', serialFor(display), 'shell', 'getprop', 'ro.product.name'])).stdout.trim()
+      : undefined;
+    const health: DisplayHealth = {
+      reachable: 'reachable',
+      adbState,
+      model,
+      product,
+      lastChecked: checkedAt,
+      message: adbState === 'connected'
+        ? 'ADB connection confirmed.'
+        : 'Device found but ADB is not authorized or ready. Accept the prompt on the Fire TV.',
+    };
+    updateDisplay(display.id, { connected: adbState === 'connected', health });
+    logStudioAction(display.id, 'health_check', `${serialFor(display)} ${adbState}`);
+    return health;
+  } catch (err: any) {
+    const message = err?.code === 'ENOENT'
+      ? 'adb command not found. Install Android platform tools.'
+      : err?.message || 'ADB diagnostic failed.';
+    const health: DisplayHealth = {
+      reachable: 'reachable',
+      adbState: err?.code === 'ENOENT' ? 'missing-adb' : 'error',
+      lastChecked: checkedAt,
+      message,
+    };
+    updateDisplay(display.id, { connected: false, health });
+    logStudioAction(display.id, 'health_check', message);
+    return health;
+  }
+}
+
+async function runPreset(presetId: string) {
+  const preset = studioPresets().find((candidate) => candidate.id === presetId);
+  if (!preset) {
+    throw new Error(`Unknown preset: ${presetId}`);
+  }
+
+  const results = [];
+  for (const action of preset.actions) {
+    results.push(await runDisplayAction(action.displayId, action.action, action.value));
+  }
+  logStudioAction('studio', 'preset', `Preset ran: ${preset.name}`);
+  return { preset, results };
 }
 
 async function runDisplayAction(displayId: string, action: string, value?: string | number) {
@@ -288,13 +651,7 @@ async function startServer() {
   }
 
   app.get('/api/studio/status', (_req, res) => {
-    res.json({
-      adbEnabled: ADB_ENABLED,
-      activeMode,
-      displays,
-      actions: actionLog,
-      warnings: studioWarnings,
-    });
+    res.json(studioStatus());
   });
 
   app.post('/api/studio/display/:displayId/control', async (req, res) => {
@@ -305,10 +662,7 @@ async function startServer() {
       const commandResult = await runDisplayAction(displayId, String(action), value);
       res.json({
         success: true,
-        adbEnabled: ADB_ENABLED,
-        activeMode,
-        displays,
-        actions: actionLog,
+        ...studioStatus(),
         ...commandResult,
       });
     } catch (err: any) {
@@ -337,7 +691,43 @@ async function startServer() {
         }
       }
       logStudioAction('studio', 'mode', `Studio mode set to ${mode}`);
-      res.json({ success: true, adbEnabled: ADB_ENABLED, activeMode, displays, actions: actionLog });
+      res.json({ success: true, ...studioStatus() });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/studio/discover', async (_req, res) => {
+    try {
+      const candidates = await discoverDisplays();
+      res.json({ success: true, candidates, ...studioStatus() });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/studio/health-check', async (req, res) => {
+    const displayId = req.body?.displayId ? String(req.body.displayId) : undefined;
+    try {
+      const targets = displayId ? [getDisplay(displayId)] : displays;
+      const health = [];
+      for (const display of targets) {
+        health.push({ displayId: display.id, health: await checkDisplayHealth(display) });
+      }
+      res.json({ success: true, health, ...studioStatus() });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/studio/presets', (_req, res) => {
+    res.json(studioPresets());
+  });
+
+  app.post('/api/studio/preset/:presetId/run', async (req, res) => {
+    try {
+      const presetResult = await runPreset(String(req.params.presetId));
+      res.json({ success: true, ...studioStatus(), ...presetResult });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message });
     }
@@ -353,7 +743,7 @@ async function startServer() {
       const commandResult = url
         ? await runDisplayAction(String(displayId), 'open_url', String(url))
         : await runDisplayAction(String(displayId), 'launch_app', String(packageName));
-      res.json({ success: true, adbEnabled: ADB_ENABLED, activeMode, displays, actions: actionLog, ...commandResult });
+      res.json({ success: true, ...studioStatus(), ...commandResult });
     } catch (err: any) {
       res.status(400).json({ success: false, error: err.message });
     }

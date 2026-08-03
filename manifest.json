@@ -1,6 +1,6 @@
 {
   "name": "Blue Lake Studio",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "purpose": "Local two-Fire-TV studio monitor control for photography and video workflows.",
   "control_model": {
     "default": "dry-run",
@@ -29,6 +29,17 @@
       "description": "Confirm both screens are reachable before a tether or review session."
     }
   ],
+  "quick_presets": [
+    "Room Ready",
+    "Capture Proof",
+    "DaVinci Review",
+    "Client Review",
+    "Sleep Room"
+  ],
+  "diagnostics": {
+    "discovery": "Configured display probes plus optional armed LAN ADB candidate discovery.",
+    "health_check": "TCP reachability, ADB state, authorization status, and Fire TV model/product metadata."
+  },
   "guardrails": [
     {
       "id": "G-001",

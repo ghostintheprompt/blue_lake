@@ -50,6 +50,9 @@ The stance is simple:
 | **Dry-Run ADB** | Default mode logs the exact ADB commands without touching hardware. |
 | **Armed Local ADB** | Optional real ADB control for devices you own on your private studio LAN. |
 | **Studio Modes** | Capture One, DaVinci, Client Review, and Mirror Check presets. |
+| **Quick Deck** | Stream Deck-style buttons and keyboard shortcuts for room actions. |
+| **LAN Discovery** | Probe configured TVs and discover Fire TV ADB candidates on the studio LAN. |
+| **Health Checks** | Check reachability, ADB state, authorization, and device model when armed. |
 | **App Launcher** | Launch configured Fire TV receiver apps or review URLs. |
 | **Local Media Shelf** | Drop media into `public/media` and stream it locally with range support. |
 | **Action Log** | See recent display commands and whether they were dry-run or armed. |
@@ -77,13 +80,22 @@ BLUE_LAKE_ENABLE_ADB=false
 HOST=127.0.0.1
 
 FIRE_TV_A_NAME="Client Proof TV"
-FIRE_TV_A_IP=192.168.1.50
+FIRE_TV_A_IP=192.0.2.50
 FIRE_TV_A_ROLE="Capture One viewer"
 
 FIRE_TV_B_NAME="Reference Playback TV"
-FIRE_TV_B_IP=192.168.1.51
+FIRE_TV_B_IP=192.0.2.51
 FIRE_TV_B_ROLE="DaVinci review"
+
+BLUE_LAKE_DISCOVERY_LIMIT=254
+BLUE_LAKE_DISCOVERY_TIMEOUT_MS=450
+BLUE_LAKE_CAPTURE_TARGET=a
+BLUE_LAKE_DAVINCI_TARGET=b
+BLUE_LAKE_REVIEW_TARGET=a
 ```
+
+These are reserved documentation IPs. Put real Fire TV IPs only in your local
+ignored `.env`, never in committed examples, screenshots, issues, or logs.
 
 Keep `BLUE_LAKE_ENABLE_ADB=false` while setting up. The dashboard will show the
 commands it would run. When the IPs are correct and ADB is enabled on the TVs,
@@ -94,6 +106,49 @@ BLUE_LAKE_ENABLE_ADB=true
 ```
 
 Then restart the server.
+
+## Quick Deck
+
+The main dashboard includes a compact command deck designed for keyboard use,
+Stream Deck mapping, or a small browser window on the Mac:
+
+| Key | Action |
+|---|---|
+| `1` | Capture One mode |
+| `2` | DaVinci mode |
+| `3` | Client Review mode |
+| `4` | Mirror Check mode |
+| `R` | Room Ready preset |
+| `C` | Capture Proof preset |
+| `D` | DaVinci Review preset |
+| `V` | Client Review preset |
+| `S` | Sleep Room preset |
+
+Preset launch targets can use Android package names or URLs:
+
+```bash
+BLUE_LAKE_CAPTURE_PACKAGE=
+BLUE_LAKE_CAPTURE_URL=
+BLUE_LAKE_DAVINCI_PACKAGE=
+BLUE_LAKE_DAVINCI_URL=
+BLUE_LAKE_REVIEW_URL=
+```
+
+Use URLs that the Fire TV can reach on the LAN. `localhost` on the Mac is not
+the same host from the TV's point of view.
+
+## Discovery And Health Checks
+
+Blue Lake can now run two levels of device confidence:
+
+| Check | Dry-Run Mode | Armed Local ADB |
+|---|---|---|
+| Configured TV probe | TCP check against the configured IP/ADB port | TCP check against the configured IP/ADB port |
+| LAN discovery | Shows the candidate range it would scan | Scans the local subnet or `BLUE_LAKE_DISCOVERY_IPS` for open ADB ports |
+| ADB state | Shows command plan only | Runs `adb connect`, `adb devices`, and reads Fire TV model/product metadata |
+
+Physical confirmation still has to happen in your studio: the TV must be awake,
+ADB Debugging must be enabled, and you must accept the pairing prompt on the TV.
 
 Keep `HOST=127.0.0.1` if you only use the dashboard on your Mac. Use
 `HOST=0.0.0.0` only when another device on your studio LAN needs to open the
@@ -107,7 +162,7 @@ dashboard in a browser.
 4. Test from your Mac:
 
 ```bash
-adb connect 192.168.1.50:5555
+adb connect <tv-ip>:5555
 adb devices
 ```
 
@@ -136,9 +191,26 @@ https://www.blackmagicdesign.com/support
 
 ```bash
 npm run dev       # local studio server
+npm run dev:armed # local studio server with real ADB control enabled
 npm run lint      # TypeScript check
 npm run build     # production frontend build
 ```
+
+## Testing
+
+Use [TESTING.md](TESTING.md) for the full dry-run, API, armed-local, media, and
+pre-commit privacy checklist. The short version:
+
+```bash
+npm run lint
+npm run build
+npm audit
+git diff --check
+```
+
+Open-source hygiene matters here: do not commit `.env`, real Fire TV IPs, SSIDs,
+ADB serials, hostnames, client names, media filenames, review URLs, or screenshots
+that reveal private network details.
 
 ## Safety Notes
 

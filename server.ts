@@ -1,317 +1,455 @@
+import 'dotenv/config';
 import express from 'express';
 import { createServer as createViteServer } from 'vite';
 import path from 'path';
 import fs from 'fs';
 import cors from 'cors';
-import { fileURLToPath } from 'url';
-import { exec } from 'child_process';
+import os from 'os';
 import crypto from 'crypto';
+import { fileURLToPath } from 'url';
+import { execFile } from 'child_process';
 import { promisify } from 'util';
 
-const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
-const VAULT_DIR = path.join(process.cwd(), 'public/media/vault');
+const MEDIA_DIR = path.join(process.cwd(), 'public/media');
+const PORT = Number(process.env.PORT || 3000);
+const HOST = process.env.HOST || '127.0.0.1';
+const ADB_ENABLED = process.env.BLUE_LAKE_ENABLE_ADB === 'true';
+const DEFAULT_ADB_PORT = Number(process.env.BLUE_LAKE_ADB_PORT || 5555);
 
-// G-001: Immutable Crypto Logger
-function logProtocolAction(actionId: string, details: any) {
-  const logEntry = {
+type StudioMode = 'capture-one' | 'davinci' | 'client-review' | 'mirror-check';
+
+type TVStatus = {
+  id: string;
+  name: string;
+  role: string;
+  ip: string;
+  adbPort: number;
+  connected: boolean;
+  power: boolean;
+  volume: number;
+  input: string;
+  currentApp: string;
+  lastCommand?: string;
+};
+
+type StudioActionLog = {
+  id: string;
+  displayId: string;
+  action: string;
+  detail: string;
+  timestamp: string;
+};
+
+const keyEvents: Record<string, string> = {
+  wake: 'KEYCODE_WAKEUP',
+  sleep: 'KEYCODE_SLEEP',
+  power: 'KEYCODE_POWER',
+  home: 'KEYCODE_HOME',
+  back: 'KEYCODE_BACK',
+  select: 'KEYCODE_DPAD_CENTER',
+  up: 'KEYCODE_DPAD_UP',
+  down: 'KEYCODE_DPAD_DOWN',
+  left: 'KEYCODE_DPAD_LEFT',
+  right: 'KEYCODE_DPAD_RIGHT',
+  menu: 'KEYCODE_MENU',
+  input: 'KEYCODE_TV_INPUT',
+  volume_up: 'KEYCODE_VOLUME_UP',
+  volume_down: 'KEYCODE_VOLUME_DOWN',
+  mute: 'KEYCODE_VOLUME_MUTE',
+};
+
+let activeMode: StudioMode = 'capture-one';
+let actionLog: StudioActionLog[] = [];
+
+let displays: TVStatus[] = [
+  {
+    id: 'a',
+    name: process.env.FIRE_TV_A_NAME || 'Client Proof TV',
+    role: process.env.FIRE_TV_A_ROLE || 'Capture One viewer',
+    ip: process.env.FIRE_TV_A_IP || '192.168.1.50',
+    adbPort: Number(process.env.FIRE_TV_A_ADB_PORT || DEFAULT_ADB_PORT),
+    connected: false,
+    power: true,
+    volume: 12,
+    input: process.env.FIRE_TV_A_INPUT || 'HDMI 1',
+    currentApp: 'Fire TV Home',
+  },
+  {
+    id: 'b',
+    name: process.env.FIRE_TV_B_NAME || 'Reference Playback TV',
+    role: process.env.FIRE_TV_B_ROLE || 'DaVinci review',
+    ip: process.env.FIRE_TV_B_IP || '192.168.1.51',
+    adbPort: Number(process.env.FIRE_TV_B_ADB_PORT || DEFAULT_ADB_PORT),
+    connected: false,
+    power: true,
+    volume: 12,
+    input: process.env.FIRE_TV_B_INPUT || 'HDMI 1',
+    currentApp: 'Fire TV Home',
+  },
+];
+
+const studioWarnings = [
+  'ADB is dry-run by default. Set BLUE_LAKE_ENABLE_ADB=true only on your private studio LAN.',
+  'Fire TVs are useful client/reference monitors. Use calibrated direct HDMI or SDI monitoring for color-critical decisions.',
+  'Blue Lake controls display state and apps; Capture One and DaVinci still own the image signal path.',
+];
+
+function serialFor(display: TVStatus) {
+  return `${display.ip}:${display.adbPort}`;
+}
+
+function logStudioAction(displayId: string, action: string, detail: string) {
+  const entry = {
+    id: crypto.randomUUID(),
+    displayId,
+    action,
+    detail,
     timestamp: new Date().toISOString(),
-    actionId,
-    details,
-    hash: crypto.createHash('sha256').update(`${actionId}-${JSON.stringify(details)}-${Date.now()}`).digest('hex')
   };
-  console.log(`[GUARDRAIL-G001] ACTION_LOGGED: ${JSON.stringify(logEntry)}`);
-  return logEntry;
+  actionLog = [entry, ...actionLog].slice(0, 40);
+  console.log(`[BLUE-LAKE-STUDIO] ${JSON.stringify(entry)}`);
+  return entry;
 }
 
-// G-002: Path-Traversal Execution Bounds
-function validateVaultPath(targetPath: string) {
-  const resolvedPath = path.resolve(VAULT_DIR, targetPath);
-  if (!resolvedPath.startsWith(VAULT_DIR)) {
-    throw new Error(`[GUARDRAIL-G002] ACCESS_DENIED: Path ${targetPath} is outside the restricted vault.`);
+function getDisplay(displayId: string) {
+  const display = displays.find((candidate) => candidate.id === displayId);
+  if (!display) {
+    throw new Error(`Unknown display id: ${displayId}`);
   }
-  return resolvedPath;
+  return display;
 }
 
-let socAlerts: any[] = [];
-
-if (!fs.existsSync(VAULT_DIR)) {
-  fs.mkdirSync(VAULT_DIR, { recursive: true });
+function updateDisplay(displayId: string, patch: Partial<TVStatus>) {
+  displays = displays.map((display) => (
+    display.id === displayId ? { ...display, ...patch } : display
+  ));
 }
 
-// Phase 3: Defensive Logic (SOC Alerts)
-fs.watch(VAULT_DIR, (eventType, filename) => {
-  if (filename) {
-    if (filename.endsWith('.pem')) {
-      socAlerts.push({ 
-        id: `INC-002-${Date.now()}`, 
-        name: 'Anomalous Cryptographic Activity', 
-        trigger: `RSA key detected: ${filename}`, 
-        timestamp: new Date().toISOString() 
-      });
+function assertSafePackageName(packageName: string) {
+  if (!/^[a-zA-Z0-9._]+$/.test(packageName)) {
+    throw new Error('Unsafe Android package name.');
+  }
+}
+
+function assertSafeUrl(url: string) {
+  const parsed = new URL(url);
+  if (!['http:', 'https:'].includes(parsed.protocol)) {
+    throw new Error('Only http and https URLs are supported for Fire TV launch.');
+  }
+}
+
+async function runAdb(display: TVStatus, args: string[]) {
+  const command = `adb ${args.join(' ')}`;
+  if (!ADB_ENABLED) {
+    return { dryRun: true, command, stdout: '' };
+  }
+
+  const { stdout } = await execFileAsync('adb', args, {
+    timeout: 8000,
+    maxBuffer: 1024 * 1024,
+  });
+  return { dryRun: false, command, stdout };
+}
+
+async function runDisplayAction(displayId: string, action: string, value?: string | number) {
+  const display = getDisplay(displayId);
+  let args: string[];
+  let currentApp = display.currentApp;
+  let connected = display.connected;
+  let power = display.power;
+  let volume = display.volume;
+
+  if (action === 'connect') {
+    args = ['connect', serialFor(display)];
+    connected = true;
+  } else if (action === 'launch_app') {
+    const packageName = String(value || '');
+    assertSafePackageName(packageName);
+    args = [
+      '-s',
+      serialFor(display),
+      'shell',
+      'monkey',
+      '-p',
+      packageName,
+      '-c',
+      'android.intent.category.LAUNCHER',
+      '1',
+    ];
+    currentApp = packageName;
+  } else if (action === 'open_url') {
+    const url = String(value || '');
+    assertSafeUrl(url);
+    args = [
+      '-s',
+      serialFor(display),
+      'shell',
+      'am',
+      'start',
+      '-a',
+      'android.intent.action.VIEW',
+      '-d',
+      url,
+    ];
+    currentApp = 'Browser / review URL';
+  } else if (action === 'volume_set') {
+    const nextVolume = Math.max(0, Math.min(100, Number(value)));
+    args = ['-s', serialFor(display), 'shell', 'media', 'volume', '--stream', '3', '--set', String(nextVolume)];
+    volume = nextVolume;
+  } else {
+    const keyEvent = keyEvents[action];
+    if (!keyEvent) {
+      throw new Error(`Unsupported action: ${action}`);
     }
-    if (filename === '.persistence.conf') {
-      socAlerts.push({ 
-        id: `INC-003-${Date.now()}`, 
-        name: 'Persistence Mechanism Established', 
-        trigger: `Hidden config detected: ${filename}`, 
-        timestamp: new Date().toISOString() 
-      });
+    args = ['-s', serialFor(display), 'shell', 'input', 'keyevent', keyEvent];
+    if (action === 'wake') power = true;
+    if (action === 'sleep') power = false;
+    if (action === 'home') currentApp = 'Fire TV Home';
+    if (action === 'volume_up') volume = Math.min(100, volume + 5);
+    if (action === 'volume_down') volume = Math.max(0, volume - 5);
+  }
+
+  const result = await runAdb(display, args);
+  updateDisplay(displayId, {
+    connected,
+    power,
+    volume,
+    currentApp,
+    lastCommand: result.command,
+  });
+  const log = logStudioAction(displayId, action, `${result.dryRun ? 'DRY RUN: ' : ''}${result.command}`);
+  return { result, log };
+}
+
+function localIp() {
+  const interfaces = os.networkInterfaces();
+  for (const entries of Object.values(interfaces)) {
+    for (const entry of entries || []) {
+      if (entry.family === 'IPv4' && !entry.internal) {
+        return entry.address;
+      }
     }
   }
-});
+  return '127.0.0.1';
+}
+
+function configuredApps() {
+  return [
+    {
+      id: 'silk',
+      name: 'Silk Browser',
+      version: 'Fire TV',
+      status: 'Configured',
+      icon: 'Play',
+      packageName: process.env.BLUE_LAKE_SILK_PACKAGE || 'com.amazon.cloud9',
+      note: 'Useful for local review pages, web galleries, and wireless handoff tools.',
+    },
+    {
+      id: 'capture',
+      name: 'Capture Receiver',
+      version: 'Studio',
+      status: process.env.BLUE_LAKE_CAPTURE_PACKAGE ? 'Configured' : 'Not Installed',
+      icon: 'Camera',
+      packageName: process.env.BLUE_LAKE_CAPTURE_PACKAGE || '',
+      note: 'Set BLUE_LAKE_CAPTURE_PACKAGE if you use AirScreen, AirReceiver, or a custom viewer.',
+    },
+    {
+      id: 'davinci',
+      name: 'Playback Receiver',
+      version: 'Studio',
+      status: process.env.BLUE_LAKE_DAVINCI_PACKAGE ? 'Configured' : 'Not Installed',
+      icon: 'Video',
+      packageName: process.env.BLUE_LAKE_DAVINCI_PACKAGE || '',
+      note: 'Optional Fire TV app for review playback. Direct monitor output is still preferred.',
+    },
+    {
+      id: 'review',
+      name: 'Client Review URL',
+      version: 'Local',
+      status: process.env.BLUE_LAKE_REVIEW_URL ? 'Configured' : 'Not Installed',
+      icon: 'Tv',
+      packageName: process.env.BLUE_LAKE_REVIEW_URL || '',
+      note: 'Set BLUE_LAKE_REVIEW_URL to open a gallery, proofing page, or local web viewer.',
+    },
+  ];
+}
 
 async function startServer() {
   const app = express();
-  const PORT = 3000;
 
   app.use(cors());
   app.use(express.json());
 
-  // API: Get Media
-  app.get('/api/media', (req, res) => {
-    // For demo purposes, we scan a 'public/media' folder or similar
-    // We'll look for media files in the project to show something
-    const mediaDir = path.join(process.cwd(), 'public/media');
-    
-    if (!fs.existsSync(mediaDir)) {
-      fs.mkdirSync(mediaDir, { recursive: true });
+  if (!fs.existsSync(MEDIA_DIR)) {
+    fs.mkdirSync(MEDIA_DIR, { recursive: true });
+  }
+
+  app.get('/api/studio/status', (_req, res) => {
+    res.json({
+      adbEnabled: ADB_ENABLED,
+      activeMode,
+      displays,
+      actions: actionLog,
+      warnings: studioWarnings,
+    });
+  });
+
+  app.post('/api/studio/display/:displayId/control', async (req, res) => {
+    const { displayId } = req.params;
+    const { action, value } = req.body || {};
+
+    try {
+      const commandResult = await runDisplayAction(displayId, String(action), value);
+      res.json({
+        success: true,
+        adbEnabled: ADB_ENABLED,
+        activeMode,
+        displays,
+        actions: actionLog,
+        ...commandResult,
+      });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.post('/api/studio/mode', async (req, res) => {
+    const mode = String(req.body?.mode || 'capture-one') as StudioMode;
+    if (!['capture-one', 'davinci', 'client-review', 'mirror-check'].includes(mode)) {
+      return res.status(400).json({ success: false, error: 'Unsupported studio mode.' });
     }
 
-    const files = fs.readdirSync(mediaDir);
+    activeMode = mode;
+    const actionsByMode: Record<StudioMode, string[]> = {
+      'capture-one': ['wake', 'home', 'mute'],
+      davinci: ['wake', 'home', 'mute'],
+      'client-review': ['wake', 'home'],
+      'mirror-check': ['wake', 'home'],
+    };
+
+    try {
+      for (const display of displays) {
+        for (const action of actionsByMode[mode]) {
+          await runDisplayAction(display.id, action);
+        }
+      }
+      logStudioAction('studio', 'mode', `Studio mode set to ${mode}`);
+      res.json({ success: true, adbEnabled: ADB_ENABLED, activeMode, displays, actions: actionLog });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/apps', (_req, res) => {
+    res.json(configuredApps());
+  });
+
+  app.post('/api/apps/launch', async (req, res) => {
+    const { displayId, packageName, url } = req.body || {};
+    try {
+      const commandResult = url
+        ? await runDisplayAction(String(displayId), 'open_url', String(url))
+        : await runDisplayAction(String(displayId), 'launch_app', String(packageName));
+      res.json({ success: true, adbEnabled: ADB_ENABLED, activeMode, displays, actions: actionLog, ...commandResult });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
+    }
+  });
+
+  app.get('/api/media', (_req, res) => {
+    const files = fs.readdirSync(MEDIA_DIR);
     const media = files
-      .filter(f => /\.(mp4|mkv|webm|mp3|wav)$/i.test(f))
-      .map((f, i) => ({
-        id: `m-${i}`,
-        name: f,
-        type: f.endsWith('.mp3') || f.endsWith('.wav') ? 'audio' : 'video',
-        url: `/api/stream/${encodeURIComponent(f)}`,
-        size: fs.statSync(path.join(mediaDir, f)).size
+      .filter((file) => /\.(mp4|mkv|webm|mp3|wav|mov)$/i.test(file))
+      .map((file, index) => ({
+        id: `m-${index}`,
+        name: file,
+        type: /\.(mp3|wav)$/i.test(file) ? 'audio' : 'video',
+        url: `/api/stream/${encodeURIComponent(file)}`,
+        size: fs.statSync(path.join(MEDIA_DIR, file)).size,
       }));
 
     res.json(media);
   });
 
-  // API: Stream with Range Support
   app.get('/api/stream/:filename', (req, res) => {
     const filename = decodeURIComponent(req.params.filename);
-    const filePath = path.join(process.cwd(), 'public/media', filename);
+    const filePath = path.resolve(MEDIA_DIR, filename);
 
-    if (!fs.existsSync(filePath)) {
+    if (!filePath.startsWith(MEDIA_DIR) || !fs.existsSync(filePath)) {
       return res.status(404).send('File not found');
     }
 
     const stat = fs.statSync(filePath);
     const fileSize = stat.size;
     const range = req.headers.range;
+    const contentType = filename.toLowerCase().endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream';
 
     if (range) {
-      const parts = range.replace(/bytes=/, "").split("-");
+      const parts = range.replace(/bytes=/, '').split('-');
       const start = parseInt(parts[0], 10);
       const end = parts[1] ? parseInt(parts[1], 10) : fileSize - 1;
-      const chunksize = (end - start) + 1;
+      const chunksize = end - start + 1;
       const file = fs.createReadStream(filePath, { start, end });
-      const head = {
+      res.writeHead(206, {
         'Content-Range': `bytes ${start}-${end}/${fileSize}`,
         'Accept-Ranges': 'bytes',
         'Content-Length': chunksize,
-        'Content-Type': filename.endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream',
-      };
-      res.writeHead(206, head);
+        'Content-Type': contentType,
+      });
       file.pipe(res);
     } else {
-      const head = {
+      res.writeHead(200, {
         'Content-Length': fileSize,
-        'Content-Type': filename.endsWith('.mp4') ? 'video/mp4' : 'application/octet-stream',
-      };
-      res.writeHead(200, head);
+        'Content-Type': contentType,
+      });
       fs.createReadStream(filePath).pipe(res);
     }
   });
 
-  // API: App Hub (Mock installations)
-  app.get('/api/apps', (req, res) => {
-    res.json([
-      { id: 'app-1', name: 'Kodi', version: '21.0', status: 'Installed', icon: 'Box', cpu: '12%', ram: '240MB' },
-      { id: 'app-2', name: 'Smart IPTV', version: '1.7.2', status: 'Updates Available', icon: 'Tv', cpu: '5%', ram: '110MB' },
-      { id: 'app-3', name: 'Stremio', version: '1.6.4', status: 'Not Installed', icon: 'Play', cpu: '0%', ram: '0MB' },
-      { id: 'app-4', name: 'VLC', version: '3.5.4', status: 'Installed', icon: 'Video', cpu: '2%', ram: '85MB' }
-    ]);
-  });
-
-  // API: System Metrics (Throughput, Temp, etc)
-  app.get('/api/system/health', (req, res) => {
+  app.get('/api/system/health', (_req, res) => {
+    const free = os.freemem() / 1024 / 1024 / 1024;
+    const total = os.totalmem() / 1024 / 1024 / 1024;
     res.json({
-      cpu_temp: `${42 + Math.floor(Math.random() * 10)}°C`,
-      throughput: `${(150 + Math.random() * 20).toFixed(2)} Mbps`,
-      latency: `${(15 + Math.random() * 5).toFixed(0)}ms`,
-      uptime: '14d 06h 22m',
-      ram_usage: '1.4GB / 4.0GB',
-      disk_space: '42GB / 128GB'
+      cpu_temp: 'n/a',
+      throughput: `${(180 + Math.random() * 35).toFixed(1)} Mbps`,
+      latency: `${(8 + Math.random() * 8).toFixed(0)} ms`,
+      uptime: `${Math.floor(os.uptime() / 3600)}h`,
+      ram_usage: `${(total - free).toFixed(1)}GB / ${total.toFixed(1)}GB`,
+      disk_space: 'studio local',
     });
   });
 
-  // API: Signal Stability Graph Data
-  app.get('/api/system/history', (req, res) => {
-    const history = Array.from({ length: 20 }, (_, i) => ({
-      timestamp: Date.now() - (19 - i) * 1000,
-      bitrate: 140 + Math.floor(Math.random() * 40),
-      ping: 15 + Math.floor(Math.random() * 10)
-    }));
-    res.json(history);
+  app.get('/api/system/history', (_req, res) => {
+    res.json(Array.from({ length: 24 }, (_, index) => ({
+      timestamp: Date.now() - (23 - index) * 1000,
+      bitrate: 160 + Math.floor(Math.random() * 60),
+      ping: 8 + Math.floor(Math.random() * 10),
+    })));
   });
 
-  app.post('/api/apps/install', async (req, res) => {
-    const { appId } = req.body;
-    logProtocolAction('app_install', { appId });
-    
-    try {
-      console.log(`[ADB-INJECT] Attempting to push package ${appId} to hardware unit...`);
-      // Functional ADB command placeholder - would target specific APKs
-      // const { stdout } = await execAsync(`adb install ./packages/${appId}.apk`);
-      res.json({ success: true, message: `Package ${appId} successfully pushed via ADB.` });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: "ADB connection failed. Ensure hardware is on grid." });
-    }
-  });
-
-  // API: TV Control (Functional ADB Bridge)
-  app.post('/api/tv/control', async (req, res) => {
-    const { action, value } = req.body;
-    logProtocolAction('tv_control', { action, value });
-    
-    try {
-      let adbCmd = '';
-      switch (action) {
-        case 'power':
-          adbCmd = 'adb shell input keyevent 26'; // POWER
-          break;
-        case 'volume':
-          // Volume is incremental in ADB; this simulates a stepped update
-          adbCmd = value > 25 ? 'adb shell input keyevent 24' : 'adb shell input keyevent 25'; 
-          break;
-        case 'input':
-          adbCmd = 'adb shell input keyevent 178'; // INPUT
-          break;
-        default:
-          adbCmd = `adb shell input keyevent ${value}`;
-      }
-      
-      console.log(`[ADB-BRIDGE] Executing: ${adbCmd}`);
-      // await execAsync(adbCmd); // Live execution
-      
-      res.json({ success: true, command: adbCmd });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: "Hardware communication error." });
-    }
-  });
-
-  // API: IPTV (Mock channels)
-  app.get('/api/iptv/channels', (req, res) => {
-    res.json([
-      { id: 'ch-1', name: 'GHOST_NEWS_WIRE', category: 'News', status: 'LIVE', url: 'rtmp://ghost/live' },
-      { id: 'ch-2', name: 'TECH_LEAKS_INT', category: 'Tech', status: 'LIVE', url: 'rtmp://tech/leaks' },
-      { id: 'ch-3', name: 'SURVEILLANCE_OSINT', category: 'Security', status: 'OFFLINE', url: 'rtmp://osint/feed' }
-    ]);
-  });
-
-  // API: AI Injection / Command Processing
-  app.post('/api/ai/inject', (req, res) => {
-    const { prompt } = req.body;
-    console.log(`[AI-INJECT] ${prompt}`);
-    // Simulate AI system modification
-    res.json({ success: true, patchNote: "System invariants updated. New permissions injected." });
-  });
-
-  // Phase 2: Actionable Logic (Scenarios)
-  app.post('/api/protocols/s1', async (req, res) => {
-    logProtocolAction('s1', { type: 'network_recon' });
-    socAlerts.push({ 
-      id: `INC-001-${Date.now()}`, 
-      name: 'Unauthorized Reconnaissance Detected', 
-      trigger: 'Execution of s1 reconnaissance scripts.', 
-      timestamp: new Date().toISOString() 
-    });
-    
-    try {
-      // Functional reconnaissance
-      const { stdout } = await execAsync('netstat -an | head -n 20');
-      res.json({ success: true, data: stdout });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  app.post('/api/protocols/s2', async (req, res) => {
-    logProtocolAction('s2', { type: 'crypto_payload' });
-    try {
-      // Functional cryptography
-      const { publicKey } = crypto.generateKeyPairSync('rsa', {
-        modulusLength: 2048,
-        publicKeyEncoding: { type: 'spki', format: 'pem' },
-        privateKeyEncoding: { type: 'pkcs8', format: 'pem' },
-      });
-
-      const keyPath = validateVaultPath('exfil_key.pem');
-      fs.writeFileSync(keyPath, publicKey);
-
-      const secretMessage = "EDITORIAL_RESTRICTED_DATA";
-      const encrypted = crypto.publicEncrypt(publicKey, Buffer.from(secretMessage));
-      
-      res.json({ 
-        success: true, 
-        message: "RSA Keypair generated and payload encrypted.",
-        payload_hash: crypto.createHash('sha256').update(encrypted).digest('hex')
-      });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  app.post('/api/protocols/s3', (req, res) => {
-    logProtocolAction('s3', { type: 'persistence' });
-    try {
-      // Functional persistence simulation
-      const configPath = validateVaultPath('.persistence.conf');
-      fs.writeFileSync(configPath, JSON.stringify({
-        baseline: 'established',
-        ghost_protocol: 'active',
-        timestamp: Date.now()
-      }));
-      res.json({ success: true, message: "Persistence configuration injected." });
-    } catch (err: any) {
-      res.status(500).json({ success: false, error: err.message });
-    }
-  });
-
-  app.get('/api/alerts', (req, res) => {
-    res.json(socAlerts.slice(-10).reverse());
-  });
-
-  // API: Network Info (Privacy Focused)
   app.get('/api/network', (req, res) => {
     const isAdmin = req.query.admin === 'true';
-    if (isAdmin) {
-      res.json({
-        ssid: 'IsolaTiberina',
-        ip: '192.168.1.153',
-        gateway: '192.168.1.1',
-        dns: '1.1.1.1',
-        shield: 'Inactive'
-      });
-    } else {
-      res.json({
-        ssid: '••••••••••••••',
-        ip: '•••.•••.•••.•••',
-        gateway: '•••.•••.•••.•••',
-        dns: '•••.•••.•••.•••',
-        shield: 'Active'
-      });
+    res.json({
+      ssid: isAdmin ? process.env.BLUE_LAKE_STUDIO_WIFI || 'studio-lan' : 'masked',
+      ip: isAdmin ? localIp() : 'masked',
+      gateway: isAdmin ? process.env.BLUE_LAKE_GATEWAY || 'auto' : 'masked',
+      dns: isAdmin ? process.env.BLUE_LAKE_DNS || 'auto' : 'masked',
+      shield: isAdmin ? 'Inactive' : 'Active',
+    });
+  });
+
+  app.post('/api/tv/control', async (req, res) => {
+    try {
+      const commandResult = await runDisplayAction('a', String(req.body?.action), req.body?.value);
+      res.json({ success: true, ...commandResult });
+    } catch (err: any) {
+      res.status(400).json({ success: false, error: err.message });
     }
   });
 
-  // Vite Integration
   if (process.env.NODE_ENV !== 'production') {
     const vite = await createViteServer({
       server: { middlewareMode: true },
@@ -321,13 +459,14 @@ async function startServer() {
   } else {
     const distPath = path.join(process.cwd(), 'dist');
     app.use(express.static(distPath));
-    app.get('*', (req, res) => {
+    app.get('*', (_req, res) => {
       res.sendFile(path.join(distPath, 'index.html'));
     });
   }
 
-  app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Blue Lake OS Server running on http://localhost:${PORT}`);
+  app.listen(PORT, HOST, () => {
+    const mode = ADB_ENABLED ? 'ARMED LOCAL ADB' : 'DRY RUN';
+    console.log(`Blue Lake Studio running on http://localhost:${PORT} (${mode})`);
   });
 }
 

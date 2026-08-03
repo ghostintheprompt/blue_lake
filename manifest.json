@@ -1,55 +1,49 @@
 {
-  "protocol": "Universal Integrity Protocol (UIP) V1.5",
-  "tier": "Ghost-Protocol Tier",
-  "manifest": {
-    "scenarios": [
-      {
-        "id": "s1",
-        "name": "Local Network Reconnaissance",
-        "description": "Functional audit of local system network listeners and active connections via subprocess.",
-        "logic": "child_process.exec(netstat/lsof/arp)"
-      },
-      {
-        "id": "s2",
-        "name": "Cryptographic Exfiltration Preparation",
-        "description": "Functional generation of RSA-2048 keys and encryption of local payloads.",
-        "logic": "node:crypto primitives"
-      },
-      {
-        "id": "s3",
-        "name": "Local Persistence Mechanism",
-        "description": "Creation of a hidden system configuration file for localized persistence simulation.",
-        "logic": "localized fs write (.persistence.conf)"
-      }
-    ],
-    "soc_alerts": [
-      {
-        "id": "INC-001",
-        "name": "Unauthorized Reconnaissance Detected",
-        "trigger": "Execution of s1 reconnaissance scripts."
-      },
-      {
-        "id": "INC-002",
-        "name": "Anomalous Cryptographic Activity",
-        "trigger": "Detection of RSA key generation or .pem file writes."
-      },
-      {
-        "id": "INC-003",
-        "name": "Persistence Mechanism Established",
-        "trigger": "Detection of hidden configuration files in restricted vault."
-      }
-    ],
-    "guardrails": [
-      {
-        "id": "G-001",
-        "name": "Immutable Crypto Logger",
-        "description": "Mandatory cryptographic hashing of all s-tier actions before execution."
-      },
-      {
-        "id": "G-002",
-        "name": "Path-Traversal Execution Bounds",
-        "description": "Strict restriction of s-tier actions to public/media/vault directory."
-      }
-    ]
-  }
+  "name": "Blue Lake Studio",
+  "version": "1.1.0",
+  "purpose": "Local two-Fire-TV studio monitor control for photography and video workflows.",
+  "control_model": {
+    "default": "dry-run",
+    "armed_mode": "BLUE_LAKE_ENABLE_ADB=true",
+    "scope": "Devices owned or administered by the operator on a private studio LAN"
+  },
+  "studio_modes": [
+    {
+      "id": "capture-one",
+      "name": "Capture One",
+      "description": "Prepare Fire TVs for photo proofing and client viewing while calibrated edit output remains primary."
+    },
+    {
+      "id": "davinci",
+      "name": "DaVinci",
+      "description": "Prepare Fire TVs for review playback while Resolve monitoring remains direct/calibrated."
+    },
+    {
+      "id": "client-review",
+      "name": "Client Review",
+      "description": "Wake room displays and prepare browser or receiver app launch targets."
+    },
+    {
+      "id": "mirror-check",
+      "name": "Mirror Check",
+      "description": "Confirm both screens are reachable before a tether or review session."
+    }
+  ],
+  "guardrails": [
+    {
+      "id": "G-001",
+      "name": "Dry Run Default",
+      "description": "ADB commands are logged but not executed unless BLUE_LAKE_ENABLE_ADB=true."
+    },
+    {
+      "id": "G-002",
+      "name": "Local Device Scope",
+      "description": "Controls are intended only for Fire TVs owned or administered by the studio operator."
+    },
+    {
+      "id": "G-003",
+      "name": "Reference Monitor Honesty",
+      "description": "Fire TVs are treated as client/reference displays, not color-critical monitors."
+    }
+  ]
 }

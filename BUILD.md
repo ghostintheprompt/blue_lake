@@ -1,43 +1,69 @@
-# Building Blue Lake
+# Building Blue Lake Studio
 
-Follow these instructions to build and package Blue Lake for production.
+Blue Lake Studio is a local web dashboard backed by an Express/Vite server.
 
-## Environment Setup
+## Requirements
 
-1. **Clone the repository**:
-   ```bash
-   git clone https://github.com/ghostintheprompt/blue-lake.git
-   cd blue-lake
-   ```
+- Node.js 18+
+- npm
+- Android platform tools (`adb`) only if you want armed Fire TV control
 
-2. **Install dependencies**:
-   ```bash
-   npm install
-   ```
-
-3. **Configure API Key**:
-   Ensure `GEMINI_API_KEY` is available in your environment or a `.env` file.
-
-## Build Commands
-
-To build the static frontend assets and prepare the production server:
+## Local Setup
 
 ```bash
+npm install
+cp .env.example .env
+npm run dev
+```
+
+Open `http://localhost:3000`.
+
+The server binds to `127.0.0.1` by default. Set `HOST=0.0.0.0` only if you
+need another trusted device on your LAN to open the dashboard.
+
+## Dry-Run First
+
+By default:
+
+```bash
+BLUE_LAKE_ENABLE_ADB=false
+```
+
+The app logs the exact ADB command it would run without controlling the TVs.
+Use this to verify names, IPs, and roles.
+
+## Armed Local ADB
+
+After enabling ADB Debugging on your Fire TVs and confirming their IPs:
+
+```bash
+BLUE_LAKE_ENABLE_ADB=true
+```
+
+Restart the server. Controls will now send real ADB commands to the configured
+devices on your local network.
+
+## Build
+
+```bash
+npm run lint
 npm run build
 ```
 
-The output will be generated in the `dist/` directory.
+The static frontend is written to `dist/`. In production mode the same server
+serves that directory.
 
-## First-Launch Instructions
-
-1. Start the production server:
-   ```bash
-   NODE_ENV=production npm run dev
-   ```
-2. Access the interface at `http://localhost:3000`.
+```bash
+NODE_ENV=production npm run dev
+```
 
 ## Troubleshooting
 
-- **Port Conflict**: If port 3000 is in use, modify the `PORT` constant in `server.ts`.
-- **API Errors**: Ensure your `GEMINI_API_KEY` is valid and has sufficient quota.
-- **Node Version**: This project requires Node.js v18 or higher.
+- **TV does not respond:** run `adb connect <tv-ip>:5555` manually and accept
+  the prompt on the Fire TV.
+- **Wrong device:** keep dry-run on until the command log shows the intended
+  serial/IP.
+- **Review URL does not open:** use a URL reachable from the Fire TV, not
+  `localhost` on the Mac.
+- **Color looks wrong:** Fire TVs are client/reference displays. Use calibrated
+  direct output for final color decisions.

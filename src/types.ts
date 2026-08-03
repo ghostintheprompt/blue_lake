@@ -15,22 +15,31 @@ export type NetworkInfo = {
 };
 
 export type TVStatus = {
+  id: string;
+  name: string;
+  role: string;
+  ip: string;
+  adbPort: number;
+  connected: boolean;
   power: boolean;
   volume: number;
   input: string;
   currentApp: string;
+  lastCommand?: string;
 };
 
-export type AppWindow = 'none' | 'media' | 'tv' | 'settings' | 'browser' | 'apps' | 'iptv';
+export type StudioMode = 'capture-one' | 'davinci' | 'client-review' | 'mirror-check';
+
+export type AppWindow = 'none' | 'media' | 'displays' | 'settings' | 'apps' | 'guide';
 
 export type AppPackage = {
   id: string;
   name: string;
   version: string;
-  status: 'Installed' | 'Not Installed' | 'Updates Available';
+  status: 'Installed' | 'Not Installed' | 'Updates Available' | 'Configured';
   icon: string;
-  cpu?: string;
-  ram?: string;
+  packageName?: string;
+  note?: string;
 };
 
 export type SystemHealth = {
@@ -48,10 +57,18 @@ export type PerformanceMark = {
   ping: number;
 };
 
-export type IPTVChannel = {
+export type StudioActionLog = {
   id: string;
-  name: string;
-  category: string;
-  status: 'LIVE' | 'OFFLINE';
-  url: string;
+  displayId: string;
+  action: string;
+  detail: string;
+  timestamp: string;
+};
+
+export type StudioStatus = {
+  adbEnabled: boolean;
+  activeMode: StudioMode;
+  displays: TVStatus[];
+  actions: StudioActionLog[];
+  warnings: string[];
 };
